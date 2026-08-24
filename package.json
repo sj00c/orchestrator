@@ -1,0 +1,21 @@
+{
+  "name": "orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "orchestrator": "./src/cli/main.ts"
+  },
+  "scripts": {
+    "orchestrator": "bun run src/cli/main.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.10",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "bun": "1.4.x"
+  }
+}
