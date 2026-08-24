@@ -1,5 +1,6 @@
 .DS_Store
 .gjc/
+.codegraph/
 node_modules/
 artifacts/
 coverage/

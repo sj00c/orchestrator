@@ -8,6 +8,8 @@
   },
   "scripts": {
     "orchestrator": "bun run src/cli/main.ts",
+    "daemon": "bun run src/daemon/main.ts",
+    "runner": "bun run src/runner/main.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

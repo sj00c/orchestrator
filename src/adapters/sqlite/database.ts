@@ -1,13 +1,36 @@
-import { mkdirSync } from "node:fs";
+import { lstatSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { Database } from "bun:sqlite";
 import { ApplicationError, applicationError } from "../../application/errors.ts";
-import type { HistoryQueries, ProjectQueries, TaskQueries, TransactionWritePorts } from "../../ports/repositories.ts";
+import {
+  claimDaemonDatabaseLockToken,
+  type DaemonDatabaseLockToken,
+} from "../../ports/instance-lock.ts";
+import type {
+  AttemptQueries,
+  DaemonQueries,
+  DefinitionQueries,
+  EvidenceQueries,
+  HistoryQueries,
+  IdempotencyQueries,
+  ProjectQueries,
+  ScheduleQueries,
+  StatusQueries,
+  TaskQueries,
+  TransactionWritePorts,
+} from "../../ports/repositories.ts";
 import type { UnitOfWork } from "../../ports/unit-of-work.ts";
 import { migrate, readUserVersion, SUPPORTED_SCHEMA_VERSION } from "./migrate.ts";
 import {
+  SqliteAttemptQueries,
+  SqliteDaemonQueries,
+  SqliteDefinitionQueries,
+  SqliteEvidenceQueries,
   SqliteHistoryQueries,
+  SqliteIdempotencyQueries,
   SqliteProjectQueries,
+  SqliteScheduleQueries,
+  SqliteStatusQueries,
   SqliteTaskQueries,
   SqliteTransactionWriteRepositories,
 } from "./repositories.ts";
@@ -24,40 +47,42 @@ export interface SqliteTransactionHooks {
 
 export interface SqliteDatabaseOpenOptions {
   hooks?: SqliteTransactionHooks;
+  expectedFileIdentity?: { dev: number; ino: number };
 }
 
 export class SqliteDatabase implements UnitOfWork {
   readonly projects: ProjectQueries;
   readonly tasks: TaskQueries;
   readonly history: HistoryQueries;
+  readonly definitions: DefinitionQueries;
+  readonly schedules: ScheduleQueries;
+  readonly attempts: AttemptQueries;
+  readonly daemons: DaemonQueries;
+  readonly evidence: EvidenceQueries;
+  readonly idempotency: IdempotencyQueries;
+  readonly status: StatusQueries;
   private closed = false;
+  private activePorts: SqliteTransactionWriteRepositories | undefined;
 
-  private constructor(
+  constructor(
     private readonly connection: Database,
     private readonly hooks: SqliteTransactionHooks | undefined,
   ) {
     this.projects = new SqliteProjectQueries(connection);
     this.tasks = new SqliteTaskQueries(connection);
     this.history = new SqliteHistoryQueries(connection);
-  }
-
-  static open(path: string, options: SqliteDatabaseOpenOptions = {}): SqliteDatabase {
-    let connection: Database | undefined;
-    try {
-      mkdirSync(dirname(path), { recursive: true });
-      connection = new Database(path, { create: true, strict: true });
-      configure(connection);
-      migrate(connection);
-      verifyConfigured(connection);
-      return new SqliteDatabase(connection, options.hooks);
-    } catch (error) {
-      try { connection?.close(); } catch { /* preserve opening failure */ }
-      throw mapSqliteError(error, "open");
-    }
+    this.definitions = new SqliteDefinitionQueries(connection);
+    this.schedules = new SqliteScheduleQueries(connection);
+    this.attempts = new SqliteAttemptQueries(connection);
+    this.daemons = new SqliteDaemonQueries(connection);
+    this.evidence = new SqliteEvidenceQueries(connection);
+    this.idempotency = new SqliteIdempotencyQueries(connection);
+    this.status = new SqliteStatusQueries(connection);
   }
 
   execute<T>(fn: (tx: TransactionWritePorts) => T): T {
     this.assertOpen();
+    if (this.activePorts) return fn({ projects: this.activePorts, tasks: this.activePorts });
     let began = false;
     let committing = false;
     let ports: SqliteTransactionWriteRepositories | undefined;
@@ -67,13 +92,19 @@ export class SqliteDatabase implements UnitOfWork {
       began = true;
       this.hooks?.afterBegin?.();
       ports = new SqliteTransactionWriteRepositories(this.connection);
+      this.activePorts = ports;
       const result = fn({ projects: ports, tasks: ports });
+      if (result instanceof Promise) {
+        throw applicationError("CONSTRAINT_VIOLATION", "SQLite unit-of-work callbacks must be synchronous.", { constraint: "synchronous unit of work" });
+      }
+      this.activePorts = undefined;
       ports.invalidate();
       committing = true;
       this.connection.exec("COMMIT");
       began = false;
       return result;
     } catch (error) {
+      this.activePorts = undefined;
       ports?.invalidate();
       if (began) {
         try { this.connection.exec("ROLLBACK"); } catch { /* original error wins */ }
@@ -97,11 +128,54 @@ export class SqliteDatabase implements UnitOfWork {
   }
 }
 
-export function openSqliteDatabase(
+export function openDaemonSqliteDatabase(
+  lockToken: DaemonDatabaseLockToken,
   path: string,
   options?: SqliteDatabaseOpenOptions,
 ): SqliteDatabase {
-  return SqliteDatabase.open(path, options);
+  if (!claimDaemonDatabaseLockToken(lockToken)) {
+    throw applicationError(
+      "LOCK_CAPABILITY_UNAVAILABLE",
+      "A valid, unconsumed daemon instance lock is required to open the daemon database.",
+      { capability: "native_lock", reason: "missing, forged, released, or previously used lock token" },
+    );
+  }
+  return openConfiguredSqliteDatabase(path, options);
+}
+
+/**
+ * Explicitly isolated opening seam for migrations and tests. It must not be
+ * used by the production daemon composition path.
+ */
+export function openIsolatedTestSqliteDatabase(
+  path: string,
+  options?: SqliteDatabaseOpenOptions,
+): SqliteDatabase {
+  return openConfiguredSqliteDatabase(path, options);
+}
+
+function openConfiguredSqliteDatabase(
+  path: string,
+  options: SqliteDatabaseOpenOptions = {},
+): SqliteDatabase {
+  let connection: Database | undefined;
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    connection = new Database(path, { create: true, strict: true });
+    if (options.expectedFileIdentity !== undefined) {
+      const opened = lstatSync(path);
+      if (opened.isSymbolicLink() || !opened.isFile() || opened.dev !== options.expectedFileIdentity.dev || opened.ino !== options.expectedFileIdentity.ino) {
+        throw applicationError("CONFIG_ERROR", "Database inode changed while opening.", { key: path });
+      }
+    }
+    configure(connection);
+    migrate(connection);
+    verifyConfigured(connection);
+    return new SqliteDatabase(connection, options.hooks);
+  } catch (error) {
+    try { connection?.close(); } catch { /* preserve opening failure */ }
+    throw mapSqliteError(error, "open");
+  }
 }
 
 function configure(connection: Database): void {

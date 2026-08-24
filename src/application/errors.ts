@@ -13,6 +13,16 @@ export const ERROR_EXIT_CODES = {
   MIGRATION_FAILED: 5,
   SCHEMA_TOO_NEW: 5,
   STORAGE_ERROR: 5,
+  DAEMON_UNAVAILABLE: 5,
+  UNKNOWN_OUTCOME: 5,
+  LOCK_CAPABILITY_UNAVAILABLE: 5,
+  RESPONSE_TOO_LARGE: 5,
+  IDEMPOTENCY_CONFLICT: 4,
+  IDEMPOTENCY_IN_PROGRESS: 4,
+  IDEMPOTENCY_EXPIRED: 4,
+  EXECUTION_CONFLICT: 4,
+  EVIDENCE_CONFLICT: 4,
+  INSTALL_CONFLICT: 4,
 } as const;
 
 export type ApplicationErrorCode = keyof typeof ERROR_EXIT_CODES;
@@ -23,7 +33,14 @@ export interface ErrorDetailsByCode {
   CONFIG_ERROR: { key: string };
   VALIDATION_ERROR: { field: string; reason: string };
   PROJECT_CONFLICT: { field: "name" | "rootPath" };
-  NOT_FOUND: { resource: "project" | "task" };
+  NOT_FOUND: {
+    resource:
+      | "project"
+      | "task"
+      | "process_definition"
+      | "schedule"
+      | "execution_attempt";
+  };
   INVALID_TRANSITION: {
     taskId: string;
     command: string;
@@ -31,7 +48,7 @@ export interface ErrorDetailsByCode {
     allowedFrom: PlannedState[];
   };
   VERSION_CONFLICT: {
-    resource: "project" | "task";
+    resource: "project" | "task" | "process_definition" | "schedule";
     id: string;
     expectedVersion: number;
     actualVersion: number | null;
@@ -43,6 +60,46 @@ export interface ErrorDetailsByCode {
   STORAGE_ERROR: {
     operation: "open" | "configure" | "read" | "write" | "commit" | "close";
   };
+  DAEMON_UNAVAILABLE: {
+    endpoint: string;
+    reason: "connect_failed" | "health_failed" | "degraded" | "draining";
+  };
+  UNKNOWN_OUTCOME: {
+    idempotencyKey: string;
+    requestId: string;
+    command: string;
+  };
+  LOCK_CAPABILITY_UNAVAILABLE: {
+    capability: "native_lock" | "close_on_exec" | "fd_whitelist";
+    reason: string;
+  };
+  RESPONSE_TOO_LARGE: {
+    resource: string;
+    recordId: string | null;
+    maxBytes: number;
+    actualBytes: number;
+  };
+  IDEMPOTENCY_CONFLICT: { idempotencyKey: string };
+  IDEMPOTENCY_IN_PROGRESS: { idempotencyKey: string; retryAfterSeconds: 1 };
+  IDEMPOTENCY_EXPIRED: { idempotencyKey: string };
+  EXECUTION_CONFLICT: {
+    taskId: string;
+    attemptId: string | null;
+    reason:
+      | "TASK_BUSY"
+      | "INVALID_STATE"
+      | "FENCE_MISMATCH"
+      | "LEASE_MISMATCH"
+      | "RUNNER_IDENTITY_MISMATCH"
+      | "RESULT_INVALID"
+      | "POSSIBLE_LIVE_CHILD"
+      | "RESUME_NOT_ALLOWED";
+  };
+  EVIDENCE_CONFLICT: {
+    source: string;
+    evidenceId: string;
+  };
+  INSTALL_CONFLICT: { resource: "plist" | "config" | "runtime" };
 }
 
 export class ApplicationError<Code extends ApplicationErrorCode> extends Error {

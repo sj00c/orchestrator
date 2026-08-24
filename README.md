@@ -1,74 +1,99 @@
 # Orchestrator
 
-로컬 프로젝트와 태스크의 **planned**(사용자가 의도한 수명주기) 및 **observed**(외부 증거로 관측한 상태)를 SQLite에 보관하는 Bun CLI입니다. 현재 MVP에는 observed 상태를 쓰는 공개 명령이 없습니다. `start` 같은 planned 명령은 observed 상태를 바꾸거나 두 상태의 불일치를 자동 보정하지 않습니다.
+Orchestrator is a macOS user-session daemon for local project, task, schedule, and managed-process state. The daemon is the only product process that opens SQLite. The CLI is a client of the daemon's private HTTP/JSON v1 Unix-domain socket (UDS); it never falls back to a direct database connection.
 
-## Requirements and installation
+## Requirements
 
-- Bun **1.4.x** (SQLite는 Bun 내장 `bun:sqlite` 사용)
-- 별도 서버, Git 저장소, 패키지 설치가 필요하지 않습니다.
+- macOS and Bun 1.4.x
+- A login user session (the service is a user `LaunchAgent`)
 
-저장소에서 실행합니다.
+Run the CLI from this repository:
 
 ```sh
 bun src/cli/main.ts --help
 bun src/cli/main.ts --version
 ```
 
-## Commands
-
-전역 옵션은 `--db <path>`, `--json`, `--verbose`입니다.
+## Daemon lifecycle and diagnosis
 
 ```sh
-# --root는 존재하는 디렉터리여야 하며 realpath로 정규화됩니다.
+bun src/cli/main.ts daemon install
+# Install-only database override:
+bun src/cli/main.ts daemon install --db /absolute/owner-only/orchestrator.db
+bun src/cli/main.ts daemon start
+bun src/cli/main.ts daemon status
+bun src/cli/main.ts daemon logs
+bun src/cli/main.ts daemon stop
+bun src/cli/main.ts daemon uninstall
+```
+
+`install` installs `dev.gjc.orchestrator` as a per-user LaunchAgent. The database defaults to `~/.local/state/orchestrator/orchestrator.db`; only `daemon install` accepts `--db <absolute-path>` to select a different owner-only location. Ordinary commands reject `--db` and never open SQLite. `start` and `stop` operate on an installed job; `status` reports the job state; `logs` returns the stdout and stderr log paths. An absent job is a distinct state from an installed-but-stopped job.
+
+The LaunchAgent uses `RunAtLoad` and `KeepAlive`: a clean daemon exit while it remains loaded is restarted. An intentional stop or uninstall must use `launchctl bootout`; killing the process alone is not a stop operation. If the job is loaded but health is unavailable, inspect `daemon logs`, then use `daemon stop` followed by `daemon start`. Do not delete a socket, lock, plist, database, or runtime directory to recover it.
+
+## Canonical paths and endpoint selection
+
+The default config is:
+
+```text
+~/Library/Application Support/Orchestrator/config.json
+```
+
+When no config provides `socketPath`, the socket is:
+
+```text
+/tmp/dev.gjc.orchestrator.<uid>/orchestrator.sock
+```
+
+The endpoint resolver uses this precedence: `--socket <absolute-path>`, then `socketPath` in `--config <absolute-path>` (or the default config), then the compiled default above. Socket paths must be absolute, contain no NUL byte, and fit the Unix socket path limit. Config files and their parent directories are owner-verified (`0600` and `0700` respectively); symlinks and insecure paths are rejected.
+
+Use the same `--config` or `--socket` for daemon administration and ordinary CLI calls. A client rejects a daemon whose endpoint fingerprint does not match its resolved configuration.
+
+## Projects and task state
+
+```sh
 bun src/cli/main.ts project add --name demo --root .
 bun src/cli/main.ts project list
-bun src/cli/main.ts project show demo
-
 bun src/cli/main.ts task add --project demo --title "release" --planned-state ready
-bun src/cli/main.ts task list --project demo --planned-state ready
 bun src/cli/main.ts task start <task-id>
-bun src/cli/main.ts task pause <task-id>
-bun src/cli/main.ts task resume <task-id>
-bun src/cli/main.ts task block <task-id> --reason "waiting for approval"
-bun src/cli/main.ts task complete <task-id>
-bun src/cli/main.ts task cancel <task-id>
-bun src/cli/main.ts task show <task-id>
-
 bun src/cli/main.ts status --project demo
-bun src/cli/main.ts history --project demo --limit 100
 bun src/cli/main.ts history --task <task-id> --since 2026-01-02T03:04:05Z
 ```
 
-Planned transition은 다음만 허용합니다: `start` (`planned|ready`), `pause` (`active`), `resume` (`paused|blocked`), `block` (`planned|ready|active|paused`), `complete` (`active|paused|blocked`), `cancel` (모든 비종료 상태). `done`과 `canceled`은 종료 상태입니다.
+`planned` is the user-requested lifecycle; `observed` is durable external evidence. A planned transition does not silently rewrite observed state. The normal planned transitions are `start`, `pause`, `resume`, `block`, `complete`, and `cancel`.
 
-기본 출력은 사람이 읽는 형식입니다. `--json` 성공 결과는 stdout에 JSON v1 envelope으로 출력합니다. 이벤트 history payload에는 프로젝트 root 경로, task 제목·설명, block reason 같은 로컬 텍스트가 포함될 수 있습니다.
+## Process definitions, schedules, and attempts
 
-## Database location
+A process definition is an immutable, versioned structured command. It is not a shell command:
 
-DB 경로는 첫 번째 non-empty 값으로 결정됩니다.
+```sh
+bun src/cli/main.ts process-definition add \
+  --task <task-id> --executable /usr/bin/true
+bun src/cli/main.ts process-definition version <definition-id> \
+  --expected-version 1 --executable /bin/echo --arg hello
+bun src/cli/main.ts schedule add \
+  --task <task-id> --definition <definition-id> --definition-version 1 \
+  --kind interval --run-at 2026-01-02T03:04:05Z --interval-seconds 3600
+bun src/cli/main.ts process start \
+  --task <task-id> --definition <definition-id> --definition-version 1
+bun src/cli/main.ts process status <attempt-id>
+bun src/cli/main.ts process stop <attempt-id> --grace-ms 5000
+```
 
-1. `--db <path>`
-2. `ORCHESTRATOR_DB`
-3. `XDG_STATE_HOME/orchestrator/orchestrator.db`
-4. `HOME/.local/state/orchestrator/orchestrator.db`
+Definitions use an executable plus repeated `--arg` values. `--cwd` is an absolute working directory. Use `--env-inherit NAME` only for explicitly needed inherited names and `--env NAME=value` for explicit values; shell strings, ambient-environment capture, PTYs, and privilege escalation are not supported. Schedules bind to one definition version, and process controls are attempt-addressed. A runner records the child result and checks process identity before signaling; an unprovable runner/child state is reported as lost rather than restarted or signaled speculatively.
 
-상대 경로는 현재 작업 디렉터리를 기준으로 해석됩니다. 선택 가능한 경로가 없으면 `CONFIG_ERROR`로 종료합니다.
+## Operations, recovery, and backup
 
-## Exit and error contract
+Sleep/wake and a daemon restart are recovery events: the daemon reconciles durable attempts and coalesces missed interval work instead of replaying an unbounded backlog. If an attempt is marked lost or may still have a live child, investigate it before resuming or starting overlapping work.
 
-성공은 exit `0`입니다. 오류는 stderr에 출력되며 `--json`에서는 인수 파싱·DB 위치 설정 실패를 포함한 모든 오류가 JSON v1 error envelope으로 출력되어 stdout을 오염시키지 않습니다. 인수/설정/검증 오류는 exit `2`, not-found는 `3`, duplicate project 또는 invalid transition은 `4`, SQLite·migration·storage 오류는 `5`입니다. `--verbose`는 stderr에 command, duration, result만 기록하며 raw SQL이나 stack trace를 출력하지 않습니다.
+For an offline backup, first stop the loaded service with `daemon stop` (which bootouts the job), verify `daemon status` is not running, then copy the database and its SQLite sidecars together. Never copy a live SQLite database by reading it directly from a second product process. Preserve the database and logs across `daemon uninstall` unless an operator intentionally removes them after an offline backup.
 
-## Offline WAL backup and restore
+## Security and failure semantics
 
-온라인/실행 중 backup은 지원하지 않습니다. 모든 orchestrator process를 종료하고 다른 process가 DB를 열지 않는 quiesced 상태에서만 수행합니다.
+Runtime, config, attempt, and log directories are owner-only; sockets, lock files, config, plists, result files, and logs are owner-only. The daemon refuses unsafe stale sockets, symlinks, ownership mismatches, and broad permissions. It has no TCP listener. Logs, status, events, and errors must not expose raw argv values, environment values, request bodies, descriptions, or block reasons. The SQLite database can contain process specifications and must be protected accordingly.
 
-1. 전용 SQLite connection으로 `PRAGMA wal_checkpoint(TRUNCATE)`를 실행하고 반환 `busy=0`을 확인합니다. 실패 또는 busy면 중단합니다.
-2. connection을 닫습니다.
-3. writer/reader를 다시 시작하지 않은 채 main DB와 존재하는 `-wal`, `-shm` sidecar를 하나의 frozen file set으로 복사합니다. sidecar가 없으면 main DB만 복사합니다.
-4. 새 경로에 전체 file set을 복원한 뒤 SQLite `integrity_check`, schema version, project/task/event count, aggregate의 마지막 event version과 current version을 확인합니다.
+A daemon-unavailable command returns `DAEMON_UNAVAILABLE`; a response lost after sending a mutation returns `UNKNOWN_OUTCOME`. Retry the latter with the same `--idempotency-key`, never by issuing a fresh mutation blindly. Oversized responses return `RESPONSE_TOO_LARGE`; pagination cannot split one public record that exceeds the response budget. `DB_BUSY` is a service failure, not a cue to open SQLite from the CLI.
 
-실행 중 main DB만 복사하거나 checkpoint 실패를 무시하는 절차는 지원하지 않습니다.
+## Boundaries and non-goals
 
-## Out of scope
-
-이 MVP는 daemon, dashboard, 실제 process 제어·감시, Git/agent integration, network API, multi-host/distributed writer, 인증·권한, DB 암호화·동기화, project/task 삭제, public observed mutation, full event sourcing/projection replay/current rebuild, online backup을 제공하지 않습니다.
+The UDS HTTP/JSON v1 boundary is the seam for a future authenticated mobile gateway. The daemon does not expose that gateway, public TCP, a web UI, remote/multi-user execution, shell-string execution, containers, arbitrary plugins, cron syntax, or a direct-DB compatibility mode.

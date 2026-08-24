@@ -41,10 +41,13 @@ describe("planned transition matrix", () => {
     }
   });
 
-  test("trims only a block reason and preserves observed-state bytes", () => {
-    const observed: ObservedState = "failed"; const original = task("active", { observedState: observed, startedAt: "2026-01-01T01:00:00.000Z" });
-    const result = transitionPlanned(original, { type: "block", reason: "  dependency unavailable  " }, clock());
-    expect(result.ok && result.next).toMatchObject({ blockedReason: "dependency unavailable", observedState: observed, startedAt: original.startedAt, finishedAt: null });
+  test("trims only a block reason and preserves every observed-state value", () => {
+    const observedStates: ObservedState[] = ["unknown", "idle", "running", "succeeded", "failed", "stale"];
+    for (const observedState of observedStates) {
+      const original = task("active", { observedState, startedAt: "2026-01-01T01:00:00.000Z" });
+      const result = transitionPlanned(original, { type: "block", reason: "  dependency unavailable  " }, clock());
+      expect(result.ok && result.next).toMatchObject({ blockedReason: "dependency unavailable", observedState, startedAt: original.startedAt, finishedAt: null });
+    }
   });
 
   test("applies timestamp lifecycle effects and clears reason leaving blocked", () => {
